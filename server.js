@@ -87,14 +87,12 @@ async function checkUser(context, userId) {
   const page = await context.newPage();
   await preparePage(page);
 
-  try {
-    await page.goto(`https://play.sooplive.com/${userId}`, {
-      waitUntil: "commit",
-      timeout: 10000
-    });
+  const candidates = [
+    `https://play.sooplive.com/${userId}`,
+    `https://www.sooplive.com/station/${userId}`
+  ];
 
-    await page.waitForTimeout(2200);
-
+  async function inspectCurrentPage(checkedUrl) {
     let html = await page.content();
     let currentUrl = page.url();
     let bodyText = await page.evaluate(() =>
@@ -102,7 +100,7 @@ async function checkUser(context, userId) {
     );
 
     if (!bodyText || !bodyText.trim()) {
-      await page.waitForTimeout(1800);
+      await page.waitForTimeout(2500);
       html = await page.content();
       currentUrl = page.url();
       bodyText = await page.evaluate(() =>
@@ -113,74 +111,61 @@ async function checkUser(context, userId) {
     const result = evaluateSignals(html, userId, bodyText, currentUrl);
 
     return {
-      userId,
-      isLive: result.isLive,
-      debug: {
-        currentUrl,
-        positiveCount: result.positiveCount,
-        hasChatUI: result.hasChatUI,
-        offlineTextFound: result.signals.bodyOffline,
-        bodyPreview: bodyText.slice(0, 300)
-      }
+      checkedUrl,
+      currentUrl,
+      bodyText,
+      result
     };
-  } catch (error) {
+  }
+
+  try {
+    let lastError = null;
+
+    for (const url of candidates) {
+      try {
+        await page.goto(url, {
+          waitUntil: "commit",
+          timeout: 15000
+        });
+
+        await page.waitForTimeout(3500);
+
+        // 1차 판정
+        let inspected = await inspectCurrentPage(url);
+
+        // false면 한 번 더 기다렸다가 재판정
+        if (!inspected.result.isLive) {
+          await page.waitForTimeout(3000);
+          inspected = await inspectCurrentPage(url);
+        }
+
+        return {
+          userId,
+          isLive: inspected.result.isLive,
+          debug: {
+            checkedUrl: inspected.checkedUrl,
+            currentUrl: inspected.currentUrl,
+            positiveCount: inspected.result.positiveCount,
+            hasChatUI: inspected.result.hasChatUI,
+            offlineTextFound: inspected.result.signals.bodyOffline,
+            signals: inspected.result.signals,
+            bodyPreview: inspected.bodyText.slice(0, 500)
+          }
+        };
+      } catch (error) {
+        lastError = error;
+      }
+    }
+
     return {
       userId,
       isLive: false,
       debug: {
-        error: error.message
+        error: lastError ? lastError.message : "unknown navigation error"
       }
     };
   } finally {
     await page.close();
-  }
-}
-
-async function doRefresh() {
-  const browser = await chromium.launch({
-    headless: true,
-    args: [
-      "--no-sandbox",
-      "--disable-setuid-sandbox",
-      "--disable-dev-shm-usage",
-      "--disable-gpu"
-    ]
-  });
-
-  const context = await browser.newContext({
-    viewport: { width: 1280, height: 900 },
-    locale: "ko-KR",
-    timezoneId: "Asia/Seoul",
-    userAgent:
-      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36"
-  });
-
-  try {
-    const currentGroupIndex = getNextGroupIndex();
-    const targets = GROUPS[currentGroupIndex];
-
-    const results = await Promise.all(
-      targets.map((userId) => checkUser(context, userId))
-    );
-
-    for (const result of results) {
-      cache.statuses[result.userId] = result.isLive;
-      cache.debug[result.userId] = result.debug;
-    }
-
-    cache.checkedAt = new Date().toISOString();
-    cache.expiresAt = Date.now() + 60 * 1000;
-
-    return {
-      statuses: cache.statuses,
-      debug: cache.debug,
-      checkedAt: cache.checkedAt,
-      groupChecked: currentGroupIndex + 1,
-      totalGroups: GROUPS.length
-    };
-  } finally {
-    await context.close();
-    await browser.close();
   }
 }
 
