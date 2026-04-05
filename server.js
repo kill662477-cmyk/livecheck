@@ -139,6 +139,6 @@ app.get("/", (req, res) => {
   res.send("SOOP live checker is running.");
 });
 
-app.listen(PORT, () => {
+app.listen(PORT, "0.0.0.0", () => {
   console.log(`Server listening on port ${PORT}`);
 });
