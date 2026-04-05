@@ -2,9 +2,8 @@ const express = require("express");
 const { chromium } = require("playwright");
 
 const app = express();
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 10000;
 
-// 체크할 BJ 목록
 const TARGETS = [
   "brainzerg7",
   "rudals5467",
@@ -28,14 +27,57 @@ const TARGETS = [
   "wlswn6565"
 ];
 
-// 메모리 캐시
 let cache = {
   checkedAt: null,
   statuses: {},
   expiresAt: 0
 };
 
-async function detectLiveWithBrowser(userId) {
+function inferLiveFromHtml(html, userId, bodyText, currentUrl) {
+  const checks = [
+    new RegExp(`play\\.sooplive\\.com/${userId}/\\d+`, "i").test(html),
+    new RegExp(`play\\.sooplive\\.com/${userId}/\\d+`, "i").test(currentUrl),
+    /방송중/i.test(bodyText),
+    /생방송/i.test(bodyText),
+    /LIVE/i.test(bodyText),
+    /ONAIR/i.test(bodyText),
+    /"is_live"\s*:\s*true/i.test(html),
+    /"isLive"\s*:\s*true/i.test(html),
+    /"is_onair"\s*:\s*true/i.test(html),
+    /"onair"\s*:\s*true/i.test(html),
+    /"broad_no"\s*:\s*"?\d+"?/i.test(html),
+    /"broadNo"\s*:\s*"?\d+"?/i.test(html)
+  ];
+
+  return checks.filter(Boolean).length >= 2;
+}
+
+async function checkUser(context, userId) {
+  const page = await context.newPage();
+
+  try {
+    const url = `https://play.sooplive.com/${userId}`;
+    await page.goto(url, {
+      waitUntil: "domcontentloaded",
+      timeout: 15000
+    });
+
+    await page.waitForTimeout(1800);
+
+    const html = await page.content();
+    const currentUrl = page.url();
+    const bodyText = await page.evaluate(() => document.body ? document.body.innerText : "");
+
+    return inferLiveFromHtml(html, userId, bodyText, currentUrl);
+  } catch (error) {
+    console.error(`[${userId}] detect error:`, error.message);
+    return false;
+  } finally {
+    await page.close();
+  }
+}
+
+async function refreshStatuses() {
   const browser = await chromium.launch({
     headless: true,
     args: ["--no-sandbox", "--disable-setuid-sandbox"]
@@ -47,68 +89,37 @@ async function detectLiveWithBrowser(userId) {
       "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36"
   });
 
-  const page = await context.newPage();
-
   try {
-    const url = `https://play.sooplive.com/${userId}`;
-    await page.goto(url, {
-      waitUntil: "domcontentloaded",
-      timeout: 30000
-    });
+    const statuses = {};
 
-    // JS 렌더 대기
-    await page.waitForTimeout(3500);
+    // 4명씩 병렬 처리
+    const chunkSize = 4;
+    for (let i = 0; i < TARGETS.length; i += chunkSize) {
+      const chunk = TARGETS.slice(i, i + chunkSize);
 
-    const html = await page.content();
-    const currentUrl = page.url();
+      const results = await Promise.all(
+        chunk.map(async (userId) => {
+          const isLive = await checkUser(context, userId);
+          return [userId, isLive];
+        })
+      );
 
-    const bodyText = await page.evaluate(() => {
-      return document.body ? document.body.innerText : "";
-    });
+      for (const [userId, isLive] of results) {
+        statuses[userId] = isLive;
+      }
+    }
 
-    const checks = [
-      new RegExp(`play\\.sooplive\\.com/${userId}/\\d+`, "i").test(html),
-      new RegExp(`play\\.sooplive\\.com/${userId}/\\d+`, "i").test(currentUrl),
-      /방송중/i.test(bodyText),
-      /생방송/i.test(bodyText),
-      /LIVE/i.test(bodyText),
-      /ONAIR/i.test(bodyText),
-      /"is_live"\s*:\s*true/i.test(html),
-      /"isLive"\s*:\s*true/i.test(html),
-      /"is_onair"\s*:\s*true/i.test(html),
-      /"onair"\s*:\s*true/i.test(html),
-      /"broad_no"\s*:\s*"?\d+"?/i.test(html),
-      /"broadNo"\s*:\s*"?\d+"?/i.test(html)
-    ];
+    cache = {
+      checkedAt: new Date().toISOString(),
+      statuses,
+      expiresAt: Date.now() + 90 * 1000
+    };
 
-    const positiveCount = checks.filter(Boolean).length;
-
-    // 너무 느슨하면 오탐나니 최소 2개 이상 만족해야 live
-    return positiveCount >= 2;
-  } catch (error) {
-    console.error(`[${userId}] detect error`, error.message);
-    return false;
+    return cache;
   } finally {
     await context.close();
     await browser.close();
   }
-}
-
-async function refreshStatuses() {
-  const statuses = {};
-
-  // 너무 한 번에 많이 열면 서버가 버거울 수 있으니 순차 처리
-  for (const userId of TARGETS) {
-    statuses[userId] = await detectLiveWithBrowser(userId);
-  }
-
-  cache = {
-    checkedAt: new Date().toISOString(),
-    statuses,
-    expiresAt: Date.now() + 60 * 1000
-  };
-
-  return cache;
 }
 
 app.get("/live-status", async (req, res) => {
@@ -121,13 +132,31 @@ app.get("/live-status", async (req, res) => {
       });
     }
 
-    const data = await refreshStatuses();
+    const timeoutPromise = new Promise((_, reject) =>
+      setTimeout(() => reject(new Error("refresh timeout")), 45000)
+    );
+
+    const data = await Promise.race([refreshStatuses(), timeoutPromise]);
+
     res.json({
       statuses: data.statuses,
       checkedAt: data.checkedAt,
       cached: false
     });
   } catch (error) {
+    console.error("refresh failed:", error.message);
+
+    // 실패해도 이전 캐시가 있으면 그거라도 반환
+    if (cache.checkedAt) {
+      return res.json({
+        statuses: cache.statuses,
+        checkedAt: cache.checkedAt,
+        cached: true,
+        stale: true,
+        error: error.message
+      });
+    }
+
     res.status(500).json({
       error: "Failed to refresh statuses",
       detail: error.message
