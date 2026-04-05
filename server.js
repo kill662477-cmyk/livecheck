@@ -2,6 +2,11 @@ const express = require("express");
 const { chromium } = require("playwright");
 
 const app = express();
+
+app.use((req, res, next) => {
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  next();
+});
 const PORT = process.env.PORT || 10000;
 
 app.use((req, res, next) => {
