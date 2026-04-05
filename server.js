@@ -52,26 +52,26 @@ function evaluateSignals(html, userId, bodyText, currentUrl) {
     htmlBroadNoCamel: /"broadNo"\s*:\s*"?\d+"?/i.test(html),
     htmlWatchText: /watch/i.test(html),
 
-    bodyOffline: /Streamer is offline/i.test(bodyText) || /오프라인/i.test(bodyText)
+    bodyOffline:
+      /Streamer is offline/i.test(bodyText) ||
+      /스트리머가 오프라인입니다/i.test(bodyText) ||
+      /오프라인/i.test(bodyText)
   };
+
+  const hasChatUI =
+    /채팅 참여 인원|채팅창 얼리기|채팅 저속모드|팬채팅|채팅 영역 숨기기|채팅 관리/i.test(bodyText);
 
   const positiveCount = Object.entries(signals)
     .filter(([key, value]) => key !== "bodyOffline" && value)
     .length;
 
-const hasChatUI =
-  /채팅 참여 인원|채팅창 얼리기|채팅 저속모드|팬채팅/i.test(bodyText);
-
-const positiveCount = Object.entries(signals)
-  .filter(([key, value]) => key !== "bodyOffline" && value)
-  .length;
-
-const isLive =
-  (positiveCount >= 1 || hasChatUI) && !signals.bodyOffline;
+  // 방송 UI가 보이거나, 신호가 1개 이상이면 라이브로 간주
+  const isLive = (positiveCount >= 1 || hasChatUI) && !signals.bodyOffline;
 
   return {
     isLive,
     positiveCount,
+    hasChatUI,
     signals
   };
 }
@@ -146,6 +146,7 @@ async function checkUser(context, userId) {
             checkedUrl: url,
             currentUrl,
             positiveCount: result.positiveCount,
+            hasChatUI: result.hasChatUI,
             offlineTextFound: result.signals.bodyOffline,
             signals: result.signals,
             bodyPreview: bodyText.slice(0, 500)
