@@ -4,30 +4,41 @@ const { chromium } = require("playwright");
 const app = express();
 const PORT = process.env.PORT || 10000;
 
-const TARGETS = [
-  "brainzerg7",
-  "rudals5467",
-  "h78ert",
-  "jihoon002",
-  "hoonykkk",
-  "rondobba",
-
+// 20명 전체를 4그룹 × 5명으로 분할
+const GROUPS = [
+  ["brainzerg7", "rudals5467", "h78ert", "jihoon002", "hoonykkk"],
+  ["rondobba", "goodzerg", "kthrs9207", "freshtomato", "wjswlgns09"],
+  ["thelddl", "alaelddl97", "db001202", "fpahsdltu1", "soju2022"],
+  ["dlaguswl501", "seemin88", "2meonjin", "vldpfm2", "wlswn6565"]
 ];
 
+// 전체 대상 목록
+const ALL_TARGETS = GROUPS.flat();
+
+// 메모리 캐시
 let cache = {
   checkedAt: null,
-  statuses: {},
-  expiresAt: 0
+  statuses: Object.fromEntries(ALL_TARGETS.map((id) => [id, false])),
+  expiresAt: 0,
+  groupIndex: 0
 };
 
+function getNextGroupIndex() {
+  const idx = cache.groupIndex;
+  cache.groupIndex = (cache.groupIndex + 1) % GROUPS.length;
+  return idx;
+}
+
 function inferLiveFromHtml(html, userId, bodyText, currentUrl) {
+  if (!html || typeof html !== "string") return false;
+
   const checks = [
     new RegExp(`play\\.sooplive\\.com/${userId}/\\d+`, "i").test(html),
     new RegExp(`play\\.sooplive\\.com/${userId}/\\d+`, "i").test(currentUrl),
     /방송중/i.test(bodyText),
     /생방송/i.test(bodyText),
-    /LIVE/i.test(bodyText),
-    /ONAIR/i.test(bodyText),
+    /\bLIVE\b/i.test(bodyText),
+    /\bONAIR\b/i.test(bodyText),
     /"is_live"\s*:\s*true/i.test(html),
     /"isLive"\s*:\s*true/i.test(html),
     /"is_onair"\s*:\s*true/i.test(html),
@@ -36,6 +47,7 @@ function inferLiveFromHtml(html, userId, bodyText, currentUrl) {
     /"broadNo"\s*:\s*"?\d+"?/i.test(html)
   ];
 
+  // 너무 느슨하면 오탐나므로 2개 이상 만족해야 live
   return checks.filter(Boolean).length >= 2;
 }
 
@@ -44,16 +56,20 @@ async function checkUser(context, userId) {
 
   try {
     const url = `https://play.sooplive.com/${userId}`;
+
     await page.goto(url, {
       waitUntil: "domcontentloaded",
       timeout: 15000
     });
 
+    // JS 렌더링 대기
     await page.waitForTimeout(1800);
 
     const html = await page.content();
     const currentUrl = page.url();
-    const bodyText = await page.evaluate(() => document.body ? document.body.innerText : "");
+    const bodyText = await page.evaluate(() =>
+      document.body ? document.body.innerText : ""
+    );
 
     return inferLiveFromHtml(html, userId, bodyText, currentUrl);
   } catch (error) {
@@ -77,32 +93,34 @@ async function refreshStatuses() {
   });
 
   try {
-    const statuses = {};
+    const currentGroupIndex = getNextGroupIndex();
+    const targets = GROUPS[currentGroupIndex];
 
-    // 6명씩 병렬 처리
-    const chunkSize = 6;
-    for (let i = 0; i < TARGETS.length; i += chunkSize) {
-      const chunk = TARGETS.slice(i, i + chunkSize);
+    console.log(
+      `[refresh] checking group ${currentGroupIndex + 1}/${GROUPS.length}:`,
+      targets
+    );
 
-      const results = await Promise.all(
-        chunk.map(async (userId) => {
-          const isLive = await checkUser(context, userId);
-          return [userId, isLive];
-        })
-      );
+    const results = await Promise.all(
+      targets.map(async (userId) => {
+        const isLive = await checkUser(context, userId);
+        return [userId, isLive];
+      })
+    );
 
-      for (const [userId, isLive] of results) {
-        statuses[userId] = isLive;
-      }
+    for (const [userId, isLive] of results) {
+      cache.statuses[userId] = isLive;
     }
 
-    cache = {
-      checkedAt: new Date().toISOString(),
-      statuses,
-      expiresAt: Date.now() + 90 * 1000
-    };
+    cache.checkedAt = new Date().toISOString();
+    cache.expiresAt = Date.now() + 60 * 1000; // 60초 캐시
 
-    return cache;
+    return {
+      statuses: cache.statuses,
+      checkedAt: cache.checkedAt,
+      groupChecked: currentGroupIndex + 1,
+      totalGroups: GROUPS.length
+    };
   } finally {
     await context.close();
     await browser.close();
@@ -111,40 +129,46 @@ async function refreshStatuses() {
 
 app.get("/live-status", async (req, res) => {
   try {
-    if (Date.now() < cache.expiresAt) {
+    // 캐시가 살아있으면 즉시 반환
+    if (Date.now() < cache.expiresAt && cache.checkedAt) {
       return res.json({
         statuses: cache.statuses,
         checkedAt: cache.checkedAt,
-        cached: true
+        cached: true,
+        nextGroup: cache.groupIndex + 1 > GROUPS.length ? 1 : cache.groupIndex + 1,
+        totalGroups: GROUPS.length
       });
     }
 
     const timeoutPromise = new Promise((_, reject) =>
-      setTimeout(() => reject(new Error("refresh timeout")), 90000)
+      setTimeout(() => reject(new Error("refresh timeout")), 45000)
     );
 
     const data = await Promise.race([refreshStatuses(), timeoutPromise]);
 
-    res.json({
+    return res.json({
       statuses: data.statuses,
       checkedAt: data.checkedAt,
-      cached: false
+      cached: false,
+      groupChecked: data.groupChecked,
+      totalGroups: data.totalGroups
     });
   } catch (error) {
     console.error("refresh failed:", error.message);
 
-    // 실패해도 이전 캐시가 있으면 그거라도 반환
+    // 실패해도 이전 캐시가 있으면 반환
     if (cache.checkedAt) {
       return res.json({
         statuses: cache.statuses,
         checkedAt: cache.checkedAt,
         cached: true,
         stale: true,
-        error: error.message
+        error: error.message,
+        totalGroups: GROUPS.length
       });
     }
 
-    res.status(500).json({
+    return res.status(500).json({
       error: "Failed to refresh statuses",
       detail: error.message
     });
