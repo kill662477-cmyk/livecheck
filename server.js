@@ -4,7 +4,11 @@ const { chromium } = require("playwright");
 const app = express();
 const PORT = process.env.PORT || 10000;
 
-// 20명 전체를 4그룹 × 5명으로 분할
+app.use((req, res, next) => {
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  next();
+});
+
 const GROUPS = [
   ["brainzerg7", "rudals5467", "h78ert", "jihoon002", "hoonykkk"],
   ["rondobba", "goodzerg", "kthrs9207", "freshtomato", "wjswlgns09"],
@@ -12,13 +16,12 @@ const GROUPS = [
   ["dlaguswl501", "seemin88", "2meonjin", "vldpfm2", "wlswn6565"]
 ];
 
-// 전체 대상 목록
 const ALL_TARGETS = GROUPS.flat();
 
-// 메모리 캐시
 let cache = {
   checkedAt: null,
-  statuses: Object.fromEntries(ALL_TARGETS.map((id) => [id, false])),
+  statuses: Object.fromEntries(ALL_TARGETS.map((id) => [id, null])),
+  debug: {},
   expiresAt: 0,
   groupIndex: 0
 };
@@ -29,26 +32,34 @@ function getNextGroupIndex() {
   return idx;
 }
 
-function inferLiveFromHtml(html, userId, bodyText, currentUrl) {
-  if (!html || typeof html !== "string") return false;
+function evaluateSignals(html, userId, bodyText, currentUrl) {
+  const signals = {
+    liveUrlInHtml: new RegExp(`play\\.sooplive\\.com/${userId}/\\d+`, "i").test(html),
+    liveUrlInCurrentUrl: new RegExp(`play\\.sooplive\\.com/${userId}/\\d+`, "i").test(currentUrl),
+    bodyLive: /\bLIVE\b/i.test(bodyText),
+    bodyOnAir: /\bONAIR\b/i.test(bodyText),
+    bodyBroadcasting: /방송중/i.test(bodyText),
+    bodyLiveKorean: /생방송/i.test(bodyText),
+    htmlIsLive: /"is_live"\s*:\s*true/i.test(html),
+    htmlIsLiveCamel: /"isLive"\s*:\s*true/i.test(html),
+    htmlOnAir: /"onair"\s*:\s*true/i.test(html),
+    htmlIsOnAir: /"is_onair"\s*:\s*true/i.test(html),
+    htmlBroadNo: /"broad_no"\s*:\s*"?\d+"?/i.test(html),
+    htmlBroadNoCamel: /"broadNo"\s*:\s*"?\d+"?/i.test(html),
+    bodyOffline: /Streamer is offline/i.test(bodyText) || /오프라인/i.test(bodyText)
+  };
 
-  const checks = [
-    new RegExp(`play\\.sooplive\\.com/${userId}/\\d+`, "i").test(html),
-    new RegExp(`play\\.sooplive\\.com/${userId}/\\d+`, "i").test(currentUrl),
-    /방송중/i.test(bodyText),
-    /생방송/i.test(bodyText),
-    /\bLIVE\b/i.test(bodyText),
-    /\bONAIR\b/i.test(bodyText),
-    /"is_live"\s*:\s*true/i.test(html),
-    /"isLive"\s*:\s*true/i.test(html),
-    /"is_onair"\s*:\s*true/i.test(html),
-    /"onair"\s*:\s*true/i.test(html),
-    /"broad_no"\s*:\s*"?\d+"?/i.test(html),
-    /"broadNo"\s*:\s*"?\d+"?/i.test(html)
-  ];
+  const positiveCount = Object.entries(signals)
+    .filter(([key, value]) => key !== "bodyOffline" && value)
+    .length;
 
-  // 너무 느슨하면 오탐나므로 2개 이상 만족해야 live
-  return checks.filter(Boolean).length >= 2;
+  const isLive = positiveCount >= 2 && !signals.bodyOffline;
+
+  return {
+    isLive,
+    positiveCount,
+    signals
+  };
 }
 
 async function checkUser(context, userId) {
@@ -62,7 +73,6 @@ async function checkUser(context, userId) {
       timeout: 15000
     });
 
-    // JS 렌더링 대기
     await page.waitForTimeout(1800);
 
     const html = await page.content();
@@ -71,10 +81,27 @@ async function checkUser(context, userId) {
       document.body ? document.body.innerText : ""
     );
 
-    return inferLiveFromHtml(html, userId, bodyText, currentUrl);
+    const result = evaluateSignals(html, userId, bodyText, currentUrl);
+
+    return {
+      userId,
+      isLive: result.isLive,
+      debug: {
+        currentUrl,
+        positiveCount: result.positiveCount,
+        offlineTextFound: result.signals.bodyOffline,
+        signals: result.signals,
+        bodyPreview: bodyText.slice(0, 300)
+      }
+    };
   } catch (error) {
-    console.error(`[${userId}] detect error:`, error.message);
-    return false;
+    return {
+      userId,
+      isLive: false,
+      debug: {
+        error: error.message
+      }
+    };
   } finally {
     await page.close();
   }
@@ -96,27 +123,21 @@ async function refreshStatuses() {
     const currentGroupIndex = getNextGroupIndex();
     const targets = GROUPS[currentGroupIndex];
 
-    console.log(
-      `[refresh] checking group ${currentGroupIndex + 1}/${GROUPS.length}:`,
-      targets
-    );
-
     const results = await Promise.all(
-      targets.map(async (userId) => {
-        const isLive = await checkUser(context, userId);
-        return [userId, isLive];
-      })
+      targets.map((userId) => checkUser(context, userId))
     );
 
-    for (const [userId, isLive] of results) {
-      cache.statuses[userId] = isLive;
+    for (const result of results) {
+      cache.statuses[result.userId] = result.isLive;
+      cache.debug[result.userId] = result.debug;
     }
 
     cache.checkedAt = new Date().toISOString();
-    cache.expiresAt = Date.now() + 60 * 1000; // 60초 캐시
+    cache.expiresAt = Date.now() + 60 * 1000;
 
     return {
       statuses: cache.statuses,
+      debug: cache.debug,
       checkedAt: cache.checkedAt,
       groupChecked: currentGroupIndex + 1,
       totalGroups: GROUPS.length
@@ -129,10 +150,10 @@ async function refreshStatuses() {
 
 app.get("/live-status", async (req, res) => {
   try {
-    // 캐시가 살아있으면 즉시 반환
     if (Date.now() < cache.expiresAt && cache.checkedAt) {
       return res.json({
         statuses: cache.statuses,
+        debug: cache.debug,
         checkedAt: cache.checkedAt,
         cached: true,
         nextGroup: cache.groupIndex + 1 > GROUPS.length ? 1 : cache.groupIndex + 1,
@@ -148,18 +169,17 @@ app.get("/live-status", async (req, res) => {
 
     return res.json({
       statuses: data.statuses,
+      debug: data.debug,
       checkedAt: data.checkedAt,
       cached: false,
       groupChecked: data.groupChecked,
       totalGroups: data.totalGroups
     });
   } catch (error) {
-    console.error("refresh failed:", error.message);
-
-    // 실패해도 이전 캐시가 있으면 반환
     if (cache.checkedAt) {
       return res.json({
         statuses: cache.statuses,
+        debug: cache.debug,
         checkedAt: cache.checkedAt,
         cached: true,
         stale: true,
