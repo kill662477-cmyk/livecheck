@@ -9,17 +9,20 @@ app.use((req, res, next) => {
   next();
 });
 
+// 20명 → 5그룹 × 4명
 const GROUPS = [
-  ["brainzerg7", "rudals5467", "h78ert", "jihoon002", "hoonykkk"],
-  ["rondobba", "goodzerg", "kthrs9207", "freshtomato", "wjswlgns09"],
-  ["thelddl", "alaelddl97", "db001202", "fpahsdltu1", "soju2022"],
-  ["dlaguswl501", "seemin88", "2meonjin", "vldpfm2", "wlswn6565"]
+  ["brainzerg7", "rudals5467", "h78ert", "jihoon002"],
+  ["hoonykkk", "rondobba", "goodzerg", "kthrs9207"],
+  ["freshtomato", "wjswlgns09", "thelddl", "alaelddl97"],
+  ["db001202", "fpahsdltu1", "soju2022", "dlaguswl501"],
+  ["seemin88", "2meonjin", "vldpfm2", "wlswn6565"]
 ];
 
 const ALL_TARGETS = GROUPS.flat();
 
 let cache = {
   checkedAt: null,
+  // 아직 검사 안한 사람은 null
   statuses: Object.fromEntries(ALL_TARGETS.map((id) => [id, null])),
   debug: {},
   expiresAt: 0,
@@ -81,9 +84,15 @@ async function preparePage(page) {
 
     return route.continue();
   });
+
+  await page.addInitScript(() => {
+    Object.defineProperty(navigator, "webdriver", {
+      get: () => false
+    });
+  });
 }
 
-async function inspectCurrentPage(page, userId, checkedUrl) {
+async function inspectCurrentPage(page, userId) {
   let html = await page.content();
   let currentUrl = page.url();
   let bodyText = await page.evaluate(() =>
@@ -91,7 +100,7 @@ async function inspectCurrentPage(page, userId, checkedUrl) {
   );
 
   if (!bodyText || !bodyText.trim()) {
-    await page.waitForTimeout(2500);
+    await page.waitForTimeout(1500);
     html = await page.content();
     currentUrl = page.url();
     bodyText = await page.evaluate(() =>
@@ -102,7 +111,6 @@ async function inspectCurrentPage(page, userId, checkedUrl) {
   const result = evaluateSignals(html, userId, bodyText, currentUrl);
 
   return {
-    checkedUrl,
     currentUrl,
     bodyText,
     result
@@ -128,20 +136,22 @@ async function checkUser(context, userId) {
           timeout: 10000
         });
 
-        await page.waitForTimeout(2200);
+        await page.waitForTimeout(1500);
 
-        let inspected = await inspectCurrentPage(page, userId, url);
+        // 1차 검사
+        let inspected = await inspectCurrentPage(page, userId);
 
+        // 첫 판정이 false면 1번 더 짧게 재검사
         if (!inspected.result.isLive) {
-          await page.waitForTimeout(2500);
-          inspected = await inspectCurrentPage(page, userId, url);
+          await page.waitForTimeout(1500);
+          inspected = await inspectCurrentPage(page, userId);
         }
 
         return {
           userId,
           isLive: inspected.result.isLive,
           debug: {
-            checkedUrl: inspected.checkedUrl,
+            checkedUrl: url,
             currentUrl: inspected.currentUrl,
             positiveCount: inspected.result.positiveCount,
             hasChatUI: inspected.result.hasChatUI,
@@ -189,10 +199,18 @@ async function doRefresh() {
     const currentGroupIndex = getNextGroupIndex();
     const targets = GROUPS[currentGroupIndex];
 
+    console.log(
+      `[refresh] checking group ${currentGroupIndex + 1}/${GROUPS.length}:`,
+      targets
+    );
+
     const results = await Promise.all(
       targets.map((userId) => checkUser(context, userId))
     );
 
+    // 중요:
+    // 이번에 검사한 사람만 업데이트
+    // 이전 그룹 값은 절대 false로 초기화하지 않음
     for (const result of results) {
       cache.statuses[result.userId] = result.isLive;
       cache.debug[result.userId] = result.debug;
@@ -240,7 +258,7 @@ app.get("/live-status", async (req, res) => {
     }
 
     const timeoutPromise = new Promise((_, reject) =>
-      setTimeout(() => reject(new Error("refresh timeout")), 15000)
+      setTimeout(() => reject(new Error("refresh timeout")), 25000)
     );
 
     const data = await Promise.race([refreshStatusesSafe(), timeoutPromise]);
@@ -253,6 +271,7 @@ app.get("/live-status", async (req, res) => {
       totalGroups: data.totalGroups
     });
   } catch (error) {
+    // 실패해도 이전 캐시 있으면 그대로 반환
     if (cache.checkedAt) {
       return res.json({
         statuses: cache.statuses,
