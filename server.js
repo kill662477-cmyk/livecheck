@@ -36,6 +36,7 @@ function evaluateSignals(html, userId, bodyText, currentUrl) {
   const signals = {
     liveUrlInHtml: new RegExp(`play\\.sooplive\\.com/${userId}/\\d+`, "i").test(html),
     liveUrlInCurrentUrl: new RegExp(`play\\.sooplive\\.com/${userId}/\\d+`, "i").test(currentUrl),
+    stationUrlInCurrentUrl: new RegExp(`sooplive\\.com/station/${userId}`, "i").test(currentUrl),
     bodyLive: /\bLIVE\b/i.test(bodyText),
     bodyOnAir: /\bONAIR\b/i.test(bodyText),
     bodyBroadcasting: /방송중/i.test(bodyText),
@@ -53,53 +54,94 @@ function evaluateSignals(html, userId, bodyText, currentUrl) {
     .filter(([key, value]) => key !== "bodyOffline" && value)
     .length;
 
+  // 너무 느슨하면 오탐 나므로 2개 이상 + 오프라인 문구 없음
   const isLive = positiveCount >= 2 && !signals.bodyOffline;
 
-  return {
-    isLive,
-    positiveCount,
-    signals
-  };
+  return { isLive, positiveCount, signals };
+}
+
+async function preparePage(page) {
+  // 무거운 리소스 차단해서 timeout 줄이기
+  await page.route("**/*", async (route) => {
+    const req = route.request();
+    const type = req.resourceType();
+    const url = req.url();
+
+    if (
+      ["image", "media", "font"].includes(type) ||
+      /doubleclick|googlesyndication|google-analytics|facebook|adservice|analytics|tracker/i.test(url)
+    ) {
+      return route.abort();
+    }
+
+    return route.continue();
+  });
+
+  // navigator.webdriver 숨기기 정도만 간단히
+  await page.addInitScript(() => {
+    Object.defineProperty(navigator, "webdriver", {
+      get: () => false
+    });
+  });
+}
+
+async function gotoFast(page, url) {
+  // commit은 "응답이 오고 문서 로딩이 시작되는 시점"만 기다림
+  await page.goto(url, {
+    waitUntil: "commit",
+    timeout: 12000
+  });
+
+  // 실제 DOM/텍스트 형성 대기
+  await page.waitForTimeout(2500);
 }
 
 async function checkUser(context, userId) {
   const page = await context.newPage();
+  await preparePage(page);
+
+  const candidates = [
+    `https://www.sooplive.com/station/${userId}`,
+    `https://play.sooplive.com/${userId}`
+  ];
 
   try {
-    const url = `https://play.sooplive.com/${userId}`;
+    let lastError = null;
 
-    await page.goto(url, {
-      waitUntil: "domcontentloaded",
-      timeout: 15000
-    });
+    for (const url of candidates) {
+      try {
+        await gotoFast(page, url);
 
-    await page.waitForTimeout(1800);
+        const html = await page.content();
+        const currentUrl = page.url();
+        const bodyText = await page.evaluate(() =>
+          document.body ? document.body.innerText : ""
+        );
 
-    const html = await page.content();
-    const currentUrl = page.url();
-    const bodyText = await page.evaluate(() =>
-      document.body ? document.body.innerText : ""
-    );
+        const result = evaluateSignals(html, userId, bodyText, currentUrl);
 
-    const result = evaluateSignals(html, userId, bodyText, currentUrl);
-
-    return {
-      userId,
-      isLive: result.isLive,
-      debug: {
-        currentUrl,
-        positiveCount: result.positiveCount,
-        offlineTextFound: result.signals.bodyOffline,
-        signals: result.signals,
-        bodyPreview: bodyText.slice(0, 300)
+        return {
+          userId,
+          isLive: result.isLive,
+          debug: {
+            checkedUrl: url,
+            currentUrl,
+            positiveCount: result.positiveCount,
+            offlineTextFound: result.signals.bodyOffline,
+            signals: result.signals,
+            bodyPreview: bodyText.slice(0, 300)
+          }
+        };
+      } catch (error) {
+        lastError = error;
       }
-    };
-  } catch (error) {
+    }
+
     return {
       userId,
       isLive: false,
       debug: {
-        error: error.message
+        error: lastError ? lastError.message : "unknown navigation error"
       }
     };
   } finally {
@@ -110,7 +152,12 @@ async function checkUser(context, userId) {
 async function refreshStatuses() {
   const browser = await chromium.launch({
     headless: true,
-    args: ["--no-sandbox", "--disable-setuid-sandbox"]
+    args: [
+      "--no-sandbox",
+      "--disable-setuid-sandbox",
+      "--disable-dev-shm-usage",
+      "--disable-gpu"
+    ]
   });
 
   const context = await browser.newContext({
@@ -162,7 +209,7 @@ app.get("/live-status", async (req, res) => {
     }
 
     const timeoutPromise = new Promise((_, reject) =>
-      setTimeout(() => reject(new Error("refresh timeout")), 45000)
+      setTimeout(() => reject(new Error("refresh timeout")), 30000)
     );
 
     const data = await Promise.race([refreshStatuses(), timeoutPromise]);
