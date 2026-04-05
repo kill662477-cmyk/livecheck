@@ -92,8 +92,8 @@ async function refreshStatuses() {
   try {
     const statuses = {};
 
-    // 4명씩 병렬 처리
-    const chunkSize = 4;
+    // 6명씩 병렬 처리
+    const chunkSize = 6;
     for (let i = 0; i < TARGETS.length; i += chunkSize) {
       const chunk = TARGETS.slice(i, i + chunkSize);
 
@@ -133,7 +133,7 @@ app.get("/live-status", async (req, res) => {
     }
 
     const timeoutPromise = new Promise((_, reject) =>
-      setTimeout(() => reject(new Error("refresh timeout")), 45000)
+      setTimeout(() => reject(new Error("refresh timeout")), 90000)
     );
 
     const data = await Promise.race([refreshStatuses(), timeoutPromise]);
