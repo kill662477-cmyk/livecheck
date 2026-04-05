@@ -9,6 +9,7 @@ app.use((req, res, next) => {
   next();
 });
 
+// 20명 전체를 4그룹 × 5명으로 분할
 const GROUPS = [
   ["brainzerg7", "rudals5467", "h78ert", "jihoon002", "hoonykkk"],
   ["rondobba", "goodzerg", "kthrs9207", "freshtomato", "wjswlgns09"],
@@ -37,16 +38,20 @@ function evaluateSignals(html, userId, bodyText, currentUrl) {
     liveUrlInHtml: new RegExp(`play\\.sooplive\\.com/${userId}/\\d+`, "i").test(html),
     liveUrlInCurrentUrl: new RegExp(`play\\.sooplive\\.com/${userId}/\\d+`, "i").test(currentUrl),
     stationUrlInCurrentUrl: new RegExp(`sooplive\\.com/station/${userId}`, "i").test(currentUrl),
+
     bodyLive: /\bLIVE\b/i.test(bodyText),
     bodyOnAir: /\bONAIR\b/i.test(bodyText),
     bodyBroadcasting: /방송중/i.test(bodyText),
     bodyLiveKorean: /생방송/i.test(bodyText),
+
     htmlIsLive: /"is_live"\s*:\s*true/i.test(html),
     htmlIsLiveCamel: /"isLive"\s*:\s*true/i.test(html),
     htmlOnAir: /"onair"\s*:\s*true/i.test(html),
     htmlIsOnAir: /"is_onair"\s*:\s*true/i.test(html),
     htmlBroadNo: /"broad_no"\s*:\s*"?\d+"?/i.test(html),
     htmlBroadNoCamel: /"broadNo"\s*:\s*"?\d+"?/i.test(html),
+    htmlWatchText: /watch/i.test(html),
+
     bodyOffline: /Streamer is offline/i.test(bodyText) || /오프라인/i.test(bodyText)
   };
 
@@ -54,14 +59,16 @@ function evaluateSignals(html, userId, bodyText, currentUrl) {
     .filter(([key, value]) => key !== "bodyOffline" && value)
     .length;
 
-  // 너무 느슨하면 오탐 나므로 2개 이상 + 오프라인 문구 없음
   const isLive = positiveCount >= 2 && !signals.bodyOffline;
 
-  return { isLive, positiveCount, signals };
+  return {
+    isLive,
+    positiveCount,
+    signals
+  };
 }
 
 async function preparePage(page) {
-  // 무거운 리소스 차단해서 timeout 줄이기
   await page.route("**/*", async (route) => {
     const req = route.request();
     const type = req.resourceType();
@@ -77,7 +84,6 @@ async function preparePage(page) {
     return route.continue();
   });
 
-  // navigator.webdriver 숨기기 정도만 간단히
   await page.addInitScript(() => {
     Object.defineProperty(navigator, "webdriver", {
       get: () => false
@@ -85,24 +91,13 @@ async function preparePage(page) {
   });
 }
 
-async function gotoFast(page, url) {
-  // commit은 "응답이 오고 문서 로딩이 시작되는 시점"만 기다림
-  await page.goto(url, {
-    waitUntil: "commit",
-    timeout: 12000
-  });
-
-  // 실제 DOM/텍스트 형성 대기
-  await page.waitForTimeout(2500);
-}
-
 async function checkUser(context, userId) {
   const page = await context.newPage();
   await preparePage(page);
 
   const candidates = [
-    `https://www.sooplive.com/station/${userId}`,
-    `https://play.sooplive.com/${userId}`
+    `https://play.sooplive.com/${userId}`,
+    `https://www.sooplive.com/station/${userId}`
   ];
 
   try {
@@ -110,13 +105,29 @@ async function checkUser(context, userId) {
 
     for (const url of candidates) {
       try {
-        await gotoFast(page, url);
+        await page.goto(url, {
+          waitUntil: "commit",
+          timeout: 15000
+        });
 
-        const html = await page.content();
-        const currentUrl = page.url();
-        const bodyText = await page.evaluate(() =>
+        // 1차 대기
+        await page.waitForTimeout(3500);
+
+        let html = await page.content();
+        let currentUrl = page.url();
+        let bodyText = await page.evaluate(() =>
           document.body ? document.body.innerText : ""
         );
+
+        // body가 비면 추가 대기 후 재시도
+        if (!bodyText || !bodyText.trim()) {
+          await page.waitForTimeout(4000);
+          html = await page.content();
+          currentUrl = page.url();
+          bodyText = await page.evaluate(() =>
+            document.body ? document.body.innerText : ""
+          );
+        }
 
         const result = evaluateSignals(html, userId, bodyText, currentUrl);
 
@@ -129,7 +140,7 @@ async function checkUser(context, userId) {
             positiveCount: result.positiveCount,
             offlineTextFound: result.signals.bodyOffline,
             signals: result.signals,
-            bodyPreview: bodyText.slice(0, 300)
+            bodyPreview: bodyText.slice(0, 500)
           }
         };
       } catch (error) {
@@ -161,14 +172,24 @@ async function refreshStatuses() {
   });
 
   const context = await browser.newContext({
-    viewport: { width: 1280, height: 900 },
+    viewport: { width: 1365, height: 900 },
+    locale: "ko-KR",
+    timezoneId: "Asia/Seoul",
     userAgent:
-      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36"
+      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36",
+    extraHTTPHeaders: {
+      "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7"
+    }
   });
 
   try {
     const currentGroupIndex = getNextGroupIndex();
     const targets = GROUPS[currentGroupIndex];
+
+    console.log(
+      `[refresh] checking group ${currentGroupIndex + 1}/${GROUPS.length}:`,
+      targets
+    );
 
     const results = await Promise.all(
       targets.map((userId) => checkUser(context, userId))
