@@ -83,6 +83,32 @@ async function preparePage(page) {
   });
 }
 
+async function inspectCurrentPage(page, userId, checkedUrl) {
+  let html = await page.content();
+  let currentUrl = page.url();
+  let bodyText = await page.evaluate(() =>
+    document.body ? document.body.innerText : ""
+  );
+
+  if (!bodyText || !bodyText.trim()) {
+    await page.waitForTimeout(2500);
+    html = await page.content();
+    currentUrl = page.url();
+    bodyText = await page.evaluate(() =>
+      document.body ? document.body.innerText : ""
+    );
+  }
+
+  const result = evaluateSignals(html, userId, bodyText, currentUrl);
+
+  return {
+    checkedUrl,
+    currentUrl,
+    bodyText,
+    result
+  };
+}
+
 async function checkUser(context, userId) {
   const page = await context.newPage();
   await preparePage(page);
@@ -92,32 +118,6 @@ async function checkUser(context, userId) {
     `https://www.sooplive.com/station/${userId}`
   ];
 
-  async function inspectCurrentPage(checkedUrl) {
-    let html = await page.content();
-    let currentUrl = page.url();
-    let bodyText = await page.evaluate(() =>
-      document.body ? document.body.innerText : ""
-    );
-
-    if (!bodyText || !bodyText.trim()) {
-      await page.waitForTimeout(2500);
-      html = await page.content();
-      currentUrl = page.url();
-      bodyText = await page.evaluate(() =>
-        document.body ? document.body.innerText : ""
-      );
-    }
-
-    const result = evaluateSignals(html, userId, bodyText, currentUrl);
-
-    return {
-      checkedUrl,
-      currentUrl,
-      bodyText,
-      result
-    };
-  }
-
   try {
     let lastError = null;
 
@@ -125,18 +125,16 @@ async function checkUser(context, userId) {
       try {
         await page.goto(url, {
           waitUntil: "commit",
-          timeout: 15000
+          timeout: 10000
         });
 
-        await page.waitForTimeout(3500);
+        await page.waitForTimeout(2200);
 
-        // 1차 판정
-        let inspected = await inspectCurrentPage(url);
+        let inspected = await inspectCurrentPage(page, userId, url);
 
-        // false면 한 번 더 기다렸다가 재판정
         if (!inspected.result.isLive) {
-          await page.waitForTimeout(3000);
-          inspected = await inspectCurrentPage(url);
+          await page.waitForTimeout(2500);
+          inspected = await inspectCurrentPage(page, userId, url);
         }
 
         return {
@@ -148,8 +146,7 @@ async function checkUser(context, userId) {
             positiveCount: inspected.result.positiveCount,
             hasChatUI: inspected.result.hasChatUI,
             offlineTextFound: inspected.result.signals.bodyOffline,
-            signals: inspected.result.signals,
-            bodyPreview: inspected.bodyText.slice(0, 500)
+            bodyPreview: inspected.bodyText.slice(0, 300)
           }
         };
       } catch (error) {
@@ -169,17 +166,64 @@ async function checkUser(context, userId) {
   }
 }
 
+async function doRefresh() {
+  const browser = await chromium.launch({
+    headless: true,
+    args: [
+      "--no-sandbox",
+      "--disable-setuid-sandbox",
+      "--disable-dev-shm-usage",
+      "--disable-gpu"
+    ]
+  });
+
+  const context = await browser.newContext({
+    viewport: { width: 1280, height: 900 },
+    locale: "ko-KR",
+    timezoneId: "Asia/Seoul",
+    userAgent:
+      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36"
+  });
+
+  try {
+    const currentGroupIndex = getNextGroupIndex();
+    const targets = GROUPS[currentGroupIndex];
+
+    const results = await Promise.all(
+      targets.map((userId) => checkUser(context, userId))
+    );
+
+    for (const result of results) {
+      cache.statuses[result.userId] = result.isLive;
+      cache.debug[result.userId] = result.debug;
+    }
+
+    cache.checkedAt = new Date().toISOString();
+    cache.expiresAt = Date.now() + 20 * 1000;
+
+    return {
+      statuses: cache.statuses,
+      debug: cache.debug,
+      checkedAt: cache.checkedAt,
+      groupChecked: currentGroupIndex + 1,
+      totalGroups: GROUPS.length
+    };
+  } finally {
+    await context.close();
+    await browser.close();
+  }
+}
+
 async function refreshStatusesSafe() {
   if (isRefreshing && refreshPromise) {
     return refreshPromise;
   }
 
   isRefreshing = true;
-  refreshPromise = doRefresh()
-    .finally(() => {
-      isRefreshing = false;
-      refreshPromise = null;
-    });
+  refreshPromise = doRefresh().finally(() => {
+    isRefreshing = false;
+    refreshPromise = null;
+  });
 
   return refreshPromise;
 }
