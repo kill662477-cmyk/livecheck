@@ -11,20 +11,7 @@ const TARGETS = [
   "jihoon002",
   "hoonykkk",
   "rondobba",
-  "goodzerg",
-  "kthrs9207",
-  "freshtomato",
-  "wjswlgns09",
-  "thelddl",
-  "alaelddl97",
-  "db001202",
-  "fpahsdltu1",
-  "soju2022",
-  "dlaguswl501",
-  "seemin88",
-  "2meonjin",
-  "vldpfm2",
-  "wlswn6565"
+
 ];
 
 let cache = {
