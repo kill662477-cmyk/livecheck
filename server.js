@@ -59,7 +59,15 @@ function evaluateSignals(html, userId, bodyText, currentUrl) {
     .filter(([key, value]) => key !== "bodyOffline" && value)
     .length;
 
-  const isLive = positiveCount >= 2 && !signals.bodyOffline;
+const hasChatUI =
+  /채팅 참여 인원|채팅창 얼리기|채팅 저속모드|팬채팅/i.test(bodyText);
+
+const positiveCount = Object.entries(signals)
+  .filter(([key, value]) => key !== "bodyOffline" && value)
+  .length;
+
+const isLive =
+  (positiveCount >= 1 || hasChatUI) && !signals.bodyOffline;
 
   return {
     isLive,
