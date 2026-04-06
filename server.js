@@ -9,20 +9,22 @@ app.use((req, res, next) => {
   next();
 });
 
-// 20명 → 4그룹 × 5명
+// 20명 → 5그룹 × 4명
 const GROUPS = [
-  ["brainzerg7", "rudals5467", "h78ert", "jihoon002", "hoonykkk"],
-  ["rondobba", "goodzerg", "kthrs9207", "freshtomato", "wjswlgns09"],
-  ["thelddl", "alaelddl97", "db001202", "fpahsdltu1", "soju2022"],
-  ["dlaguswl501", "seemin88", "2meonjin", "vldpfm2", "wlswn6565"]
+  ["brainzerg7", "rudals5467", "h78ert", "jihoon002"],
+  ["hoonykkk", "rondobba", "goodzerg", "kthrs9207"],
+  ["freshtomato", "wjswlgns09", "thelddl", "alaelddl97"],
+  ["db001202", "fpahsdltu1", "soju2022", "dlaguswl501"],
+  ["seemin88", "2meonjin", "vldpfm2", "wlswn6565"]
 ];
 
 const ALL_TARGETS = GROUPS.flat();
 
 let cache = {
   checkedAt: null,
+  // 아직 검사 안한 사람은 null
   statuses: Object.fromEntries(ALL_TARGETS.map((id) => [id, null])),
-  debug: Object.fromEntries(ALL_TARGETS.map((id) => [id, null])),
+  debug: {},
   expiresAt: 0,
   groupIndex: 0
 };
@@ -36,30 +38,34 @@ function getNextGroupIndex() {
   return idx;
 }
 
-function judgeByOfflineText(bodyText) {
-  const text = (bodyText || "").trim();
+function evaluateSignals(html, userId, bodyText, currentUrl) {
+  const signals = {
+    liveUrlInHtml: new RegExp(`play\\.sooplive\\.com/${userId}/\\d+`, "i").test(html),
+    liveUrlInCurrentUrl: new RegExp(`play\\.sooplive\\.com/${userId}/\\d+`, "i").test(currentUrl),
+    bodyLive: /\bLIVE\b/i.test(bodyText),
+    bodyOnAir: /\bONAIR\b/i.test(bodyText),
+    bodyBroadcasting: /방송중/i.test(bodyText),
+    bodyLiveKorean: /생방송/i.test(bodyText),
+    bodyOffline:
+      /Streamer is offline/i.test(bodyText) ||
+      /스트리머가 오프라인입니다/i.test(bodyText) ||
+      /오프라인/i.test(bodyText)
+  };
 
-  const isOffline =
-    /스트리머가 오프라인입니다/i.test(text) ||
-    /Streamer is offline/i.test(text);
+  const hasChatUI =
+    /채팅 참여 인원|채팅창 얼리기|채팅 저속모드|팬채팅|채팅 영역 숨기기|채팅 관리/i.test(bodyText);
 
-  if (isOffline) {
-    return {
-      isLive: false,
-      reason: "offline-text"
-    };
-  }
+  const positiveCount = Object.entries(signals)
+    .filter(([key, value]) => key !== "bodyOffline" && value)
+    .length;
 
-  if (text.length >= 30) {
-    return {
-      isLive: true,
-      reason: "non-empty-body"
-    };
-  }
+  const isLive = (positiveCount >= 1 || hasChatUI) && !signals.bodyOffline;
 
   return {
-    isLive: null,
-    reason: "empty-body"
+    isLive,
+    positiveCount,
+    hasChatUI,
+    signals
   };
 }
 
@@ -86,10 +92,29 @@ async function preparePage(page) {
   });
 }
 
-async function getBodyText(page) {
-  return await page.evaluate(() => {
-    return document.body ? document.body.innerText : "";
-  });
+async function inspectCurrentPage(page, userId) {
+  let html = await page.content();
+  let currentUrl = page.url();
+  let bodyText = await page.evaluate(() =>
+    document.body ? document.body.innerText : ""
+  );
+
+  if (!bodyText || !bodyText.trim()) {
+    await page.waitForTimeout(1500);
+    html = await page.content();
+    currentUrl = page.url();
+    bodyText = await page.evaluate(() =>
+      document.body ? document.body.innerText : ""
+    );
+  }
+
+  const result = evaluateSignals(html, userId, bodyText, currentUrl);
+
+  return {
+    currentUrl,
+    bodyText,
+    result
+  };
 }
 
 async function checkUser(context, userId) {
@@ -113,29 +138,25 @@ async function checkUser(context, userId) {
 
         await page.waitForTimeout(1500);
 
-        let currentUrl = page.url();
-        let bodyText = await getBodyText(page);
-        let judged = judgeByOfflineText(bodyText);
+        // 1차 검사
+        let inspected = await inspectCurrentPage(page, userId);
 
-        // 본문이 애매하면 한 번 더 짧게 재검사
-        if (judged.isLive === null) {
+        // 첫 판정이 false면 1번 더 짧게 재검사
+        if (!inspected.result.isLive) {
           await page.waitForTimeout(1500);
-          currentUrl = page.url();
-          bodyText = await getBodyText(page);
-          judged = judgeByOfflineText(bodyText);
+          inspected = await inspectCurrentPage(page, userId);
         }
-
-        const finalLive = judged.isLive === null ? false : judged.isLive;
 
         return {
           userId,
-          isLive: finalLive,
+          isLive: inspected.result.isLive,
           debug: {
             checkedUrl: url,
-            currentUrl,
-            reason: judged.reason,
-            bodyLength: bodyText.length,
-            bodyPreview: bodyText.slice(0, 400)
+            currentUrl: inspected.currentUrl,
+            positiveCount: inspected.result.positiveCount,
+            hasChatUI: inspected.result.hasChatUI,
+            offlineTextFound: inspected.result.signals.bodyOffline,
+            bodyPreview: inspected.bodyText.slice(0, 300)
           }
         };
       } catch (error) {
@@ -187,7 +208,9 @@ async function doRefresh() {
       targets.map((userId) => checkUser(context, userId))
     );
 
-    // 중요: 이번 그룹만 갱신, 이전 그룹 값은 유지
+    // 중요:
+    // 이번에 검사한 사람만 업데이트
+    // 이전 그룹 값은 절대 false로 초기화하지 않음
     for (const result of results) {
       cache.statuses[result.userId] = result.isLive;
       cache.debug[result.userId] = result.debug;
@@ -225,14 +248,11 @@ async function refreshStatusesSafe() {
 
 app.get("/live-status", async (req, res) => {
   try {
-    // 캐시 살아있으면 바로 반환
     if (Date.now() < cache.expiresAt && cache.checkedAt) {
       return res.json({
         statuses: cache.statuses,
-        debug: cache.debug,
         checkedAt: cache.checkedAt,
         cached: true,
-        nextGroup: cache.groupIndex + 1 > GROUPS.length ? 1 : cache.groupIndex + 1,
         totalGroups: GROUPS.length
       });
     }
@@ -245,7 +265,6 @@ app.get("/live-status", async (req, res) => {
 
     return res.json({
       statuses: data.statuses,
-      debug: data.debug,
       checkedAt: data.checkedAt,
       cached: false,
       groupChecked: data.groupChecked,
@@ -256,7 +275,6 @@ app.get("/live-status", async (req, res) => {
     if (cache.checkedAt) {
       return res.json({
         statuses: cache.statuses,
-        debug: cache.debug,
         checkedAt: cache.checkedAt,
         cached: true,
         stale: true,
