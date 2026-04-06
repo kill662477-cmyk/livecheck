@@ -9,47 +9,31 @@ app.use((req, res, next) => {
   next();
 });
 
-const TARGETS = [
-  "brainzerg7",
-  "rudals5467",
-  "h78ert",
-  "jihoon002",
-  "hoonykkk",
-  "rondobba",
-  "goodzerg",
-  "kthrs9207",
-  "freshtomato",
-  "wjswlgns09",
-  "thelddl",
-  "alaelddl97",
-  "db001202",
-  "fpahsdltu1",
-  "soju2022",
-  "dlaguswl501",
-  "seemin88",
-  "2meonjin",
-  "vldpfm2",
-  "wlswn6565"
+// 20명 → 4그룹 × 5명
+const GROUPS = [
+  ["brainzerg7", "rudals5467", "h78ert", "jihoon002", "hoonykkk"],
+  ["rondobba", "goodzerg", "kthrs9207", "freshtomato", "wjswlgns09"],
+  ["thelddl", "alaelddl97", "db001202", "fpahsdltu1", "soju2022"],
+  ["dlaguswl501", "seemin88", "2meonjin", "vldpfm2", "wlswn6565"]
 ];
 
-const CHUNK_SIZE = 5;
+const ALL_TARGETS = GROUPS.flat();
 
 let cache = {
   checkedAt: null,
-  statuses: Object.fromEntries(TARGETS.map((id) => [id, null])),
-  debug: {},
-  expiresAt: 0
+  statuses: Object.fromEntries(ALL_TARGETS.map((id) => [id, null])),
+  debug: Object.fromEntries(ALL_TARGETS.map((id) => [id, null])),
+  expiresAt: 0,
+  groupIndex: 0
 };
 
 let isRefreshing = false;
 let refreshPromise = null;
 
-function chunkArray(arr, size) {
-  const chunks = [];
-  for (let i = 0; i < arr.length; i += size) {
-    chunks.push(arr.slice(i, i + size));
-  }
-  return chunks;
+function getNextGroupIndex() {
+  const idx = cache.groupIndex;
+  cache.groupIndex = (cache.groupIndex + 1) % GROUPS.length;
+  return idx;
 }
 
 function judgeByOfflineText(bodyText) {
@@ -133,7 +117,7 @@ async function checkUser(context, userId) {
         let bodyText = await getBodyText(page);
         let judged = judgeByOfflineText(bodyText);
 
-        // 본문이 너무 비면 한 번 더 기다렸다가 재검사
+        // 본문이 애매하면 한 번 더 짧게 재검사
         if (judged.isLive === null) {
           await page.waitForTimeout(1500);
           currentUrl = page.url();
@@ -141,7 +125,6 @@ async function checkUser(context, userId) {
           judged = judgeByOfflineText(bodyText);
         }
 
-        // 그래도 비면 false 처리
         const finalLive = judged.isLive === null ? false : judged.isLive;
 
         return {
@@ -152,7 +135,7 @@ async function checkUser(context, userId) {
             currentUrl,
             reason: judged.reason,
             bodyLength: bodyText.length,
-            bodyPreview: bodyText.slice(0, 500)
+            bodyPreview: bodyText.slice(0, 400)
           }
         };
       } catch (error) {
@@ -192,30 +175,33 @@ async function doRefresh() {
   });
 
   try {
-    const chunks = chunkArray(TARGETS, CHUNK_SIZE);
-    const nextStatuses = { ...cache.statuses };
-    const nextDebug = { ...cache.debug };
+    const currentGroupIndex = getNextGroupIndex();
+    const targets = GROUPS[currentGroupIndex];
 
-    for (const group of chunks) {
-      const results = await Promise.all(
-        group.map((userId) => checkUser(context, userId))
-      );
+    console.log(
+      `[refresh] checking group ${currentGroupIndex + 1}/${GROUPS.length}:`,
+      targets
+    );
 
-      for (const result of results) {
-        nextStatuses[result.userId] = result.isLive;
-        nextDebug[result.userId] = result.debug;
-      }
+    const results = await Promise.all(
+      targets.map((userId) => checkUser(context, userId))
+    );
+
+    // 중요: 이번 그룹만 갱신, 이전 그룹 값은 유지
+    for (const result of results) {
+      cache.statuses[result.userId] = result.isLive;
+      cache.debug[result.userId] = result.debug;
     }
 
-    cache.statuses = nextStatuses;
-    cache.debug = nextDebug;
     cache.checkedAt = new Date().toISOString();
     cache.expiresAt = Date.now() + 20 * 1000;
 
     return {
       statuses: cache.statuses,
       debug: cache.debug,
-      checkedAt: cache.checkedAt
+      checkedAt: cache.checkedAt,
+      groupChecked: currentGroupIndex + 1,
+      totalGroups: GROUPS.length
     };
   } finally {
     await context.close();
@@ -239,18 +225,20 @@ async function refreshStatusesSafe() {
 
 app.get("/live-status", async (req, res) => {
   try {
+    // 캐시 살아있으면 바로 반환
     if (Date.now() < cache.expiresAt && cache.checkedAt) {
       return res.json({
         statuses: cache.statuses,
         debug: cache.debug,
         checkedAt: cache.checkedAt,
         cached: true,
-        totalTargets: TARGETS.length
+        nextGroup: cache.groupIndex + 1 > GROUPS.length ? 1 : cache.groupIndex + 1,
+        totalGroups: GROUPS.length
       });
     }
 
     const timeoutPromise = new Promise((_, reject) =>
-      setTimeout(() => reject(new Error("refresh timeout")), 30000)
+      setTimeout(() => reject(new Error("refresh timeout")), 25000)
     );
 
     const data = await Promise.race([refreshStatusesSafe(), timeoutPromise]);
@@ -260,9 +248,11 @@ app.get("/live-status", async (req, res) => {
       debug: data.debug,
       checkedAt: data.checkedAt,
       cached: false,
-      totalTargets: TARGETS.length
+      groupChecked: data.groupChecked,
+      totalGroups: data.totalGroups
     });
   } catch (error) {
+    // 실패해도 이전 캐시 있으면 그대로 반환
     if (cache.checkedAt) {
       return res.json({
         statuses: cache.statuses,
@@ -271,7 +261,7 @@ app.get("/live-status", async (req, res) => {
         cached: true,
         stale: true,
         error: error.message,
-        totalTargets: TARGETS.length
+        totalGroups: GROUPS.length
       });
     }
 
