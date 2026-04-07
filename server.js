@@ -82,5 +82,6 @@ app.get("/live-status", async (req, res) => {
   let browser;
   try {
     // 2. 브라우저 실행
-    browser = await chromium.launch({ 
-      args: ["--no-sandbox", "--disable-setuid-
+browser = await chromium.launch({ 
+      args: ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"] 
+    });
