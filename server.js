@@ -9,9 +9,8 @@ app.use((req, res, next) => {
   next();
 });
 
-// 테스트를 위해 'arinbbidol'을 맨 앞에 추가했습니다.
 const TARGETS = [
-  "arinbbidol", // <-- 테스트 타겟
+  "arinbbidol", // 테스트용
   "brainzerg7", "rudals5467", "h78ert", "jihoon002",
   "hoonykkk", "rondobba", "goodzerg", "kthrs9207",
   "freshtomato", "wjswlgns09", "thelddl", "alaelddl97",
@@ -26,11 +25,14 @@ let cache = {
 };
 
 async function checkUser(browser, userId) {
-  const context = await browser.newContext({
-    userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-  });
-  const page = await context.newPage();
+  let context;
   try {
+    context = await browser.newContext({
+      userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    });
+    const page = await context.newPage();
+
+    // 불필요한 리소스 차단 (메모리 아끼기)
     await page.route("**/*", (route) => {
       const type = route.request().resourceType();
       if (["image", "media", "font", "stylesheet"].includes(type)) {
@@ -39,41 +41,49 @@ async function checkUser(browser, userId) {
       route.continue();
     });
 
-    // 방송국 주소로 접속
     await page.goto(`https://www.sooplive.com/station/${userId}`, {
-      waitUntil: "domcontentloaded", 
-      timeout: 12000 // 테스트 시 여유 있게 12초 설정
+      waitUntil: "domcontentloaded",
+      timeout: 15000
     });
 
     const html = await page.content();
-    
-    // SOOP의 라이브 플래그 확인 (is_live: true 또는 live_badge 클래스)
     const isLive = /"is_live"\s*:\s*true/i.test(html) || 
                    /"onair"\s*:\s*true/i.test(html) ||
                    html.includes('live_badge');
 
     return { userId, isLive };
   } catch (e) {
-    console.log(`[Error] ${userId} 체크 실패:`, e.message);
     return { userId, isLive: false };
   } finally {
-    await context.close();
+    if (context) await context.close();
   }
 }
 
 app.get("/live-status", async (req, res) => {
-  // 테스트를 위해 캐시 시간을 5초로 대폭 줄였습니다. (실시간 확인용)
   if (Date.now() < cache.expiresAt && cache.checkedAt) {
     return res.json({ statuses: cache.statuses, checkedAt: cache.checkedAt, cached: true });
   }
 
   let browser;
   try {
+    // Render/Docker 환경에서 가장 안정적인 실행 옵션
     browser = await chromium.launch({ 
-      args: ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"] 
+      headless: true,
+      args: [
+        "--no-sandbox", 
+        "--disable-setuid-sandbox", 
+        "--disable-dev-shm-usage",
+        "--disable-gpu"
+      ] 
     });
     
-    const results = await Promise.all(TARGETS.map(id => checkUser(browser, id)));
+    // 21명을 한 번에 돌리면 메모리가 터질 수 있으니, 7명씩 3묶음으로 나눠서 실행 (안정성 확보)
+    const results = [];
+    for (let i = 0; i < TARGETS.length; i += 7) {
+      const chunk = TARGETS.slice(i, i + 7);
+      const chunkResults = await Promise.all(chunk.map(id => checkUser(browser, id)));
+      results.push(...chunkResults);
+    }
     
     const newStatuses = {};
     results.forEach(r => { newStatuses[r.userId] = r.isLive; });
@@ -81,7 +91,7 @@ app.get("/live-status", async (req, res) => {
     cache = {
       statuses: newStatuses,
       checkedAt: new Date().toISOString(),
-      expiresAt: Date.now() + 5000 // 5초 후 만료
+      expiresAt: Date.now() + 45000 // 45초 캐시
     };
 
     res.json({ statuses: cache.statuses, checkedAt: cache.checkedAt, cached: false });
