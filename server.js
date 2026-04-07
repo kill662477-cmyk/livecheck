@@ -10,7 +10,7 @@ app.use((req, res, next) => {
 });
 
 const TARGETS = [
-  "arinbbidol", // 테스트용
+  "arinbbidol", // 테스트용 (현재 방송 중)
   "brainzerg7", "rudals5467", "h78ert", "jihoon002",
   "hoonykkk", "rondobba", "goodzerg", "kthrs9207",
   "freshtomato", "wjswlgns09", "thelddl", "alaelddl97",
@@ -25,19 +25,15 @@ let cache = {
 };
 
 async function checkUser(browser, userId) {
-  let context;
+  const context = await browser.newContext({
+    userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+  });
+  const page = await context.newPage();
   try {
-    context = await browser.newContext({
-      userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-    });
-    const page = await context.newPage();
-
-    // 불필요한 리소스 차단 (메모리 아끼기)
+    // 리소스 차단 (메모리 절약 핵심)
     await page.route("**/*", (route) => {
       const type = route.request().resourceType();
-      if (["image", "media", "font", "stylesheet"].includes(type)) {
-        return route.abort();
-      }
+      if (["image", "media", "font", "stylesheet"].includes(type)) return route.abort();
       route.continue();
     });
 
@@ -55,7 +51,7 @@ async function checkUser(browser, userId) {
   } catch (e) {
     return { userId, isLive: false };
   } finally {
-    if (context) await context.close();
+    await context.close();
   }
 }
 
@@ -66,21 +62,14 @@ app.get("/live-status", async (req, res) => {
 
   let browser;
   try {
-    // Render/Docker 환경에서 가장 안정적인 실행 옵션
     browser = await chromium.launch({ 
-      headless: true,
-      args: [
-        "--no-sandbox", 
-        "--disable-setuid-sandbox", 
-        "--disable-dev-shm-usage",
-        "--disable-gpu"
-      ] 
+      args: ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"] 
     });
     
-    // 21명을 한 번에 돌리면 메모리가 터질 수 있으니, 7명씩 3묶음으로 나눠서 실행 (안정성 확보)
     const results = [];
-    for (let i = 0; i < TARGETS.length; i += 7) {
-      const chunk = TARGETS.slice(i, i + 7);
+    // [안정성 강화] 5명씩 나누어서 순차 실행 (메모리 폭주 방지)
+    for (let i = 0; i < TARGETS.length; i += 5) {
+      const chunk = TARGETS.slice(i, i + 5);
       const chunkResults = await Promise.all(chunk.map(id => checkUser(browser, id)));
       results.push(...chunkResults);
     }
@@ -91,7 +80,7 @@ app.get("/live-status", async (req, res) => {
     cache = {
       statuses: newStatuses,
       checkedAt: new Date().toISOString(),
-      expiresAt: Date.now() + 45000 // 45초 캐시
+      expiresAt: Date.now() + 60000 // 1분 캐시
     };
 
     res.json({ statuses: cache.statuses, checkedAt: cache.checkedAt, cached: false });
