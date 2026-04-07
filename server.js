@@ -19,18 +19,20 @@ let cache = { statuses: {}, checkedAt: null, expiresAt: 0 };
 
 async function checkUser(userId) {
   try {
-    // 플레이어 페이지로 직접 요청 (가장 정확함)
-    const response = await axios.get(`https://play.sooplive.com/${userId}`, {
+    // 1. 단순 페이지가 아닌 실제 방송 상태 API를 직접 호출
+    const response = await axios.get(`https://chapi.sooplive.com/api/${userId}/station`, {
       headers: {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Referer": "https://www.sooplive.com/"
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+        "Referer": `https://www.sooplive.com/station/${userId}`,
+        "Origin": "https://www.sooplive.com"
       },
-      timeout: 8000
+      timeout: 5000
     });
 
-    const html = response.data;
-    // 방송 번호(broad_no)가 0이 아니면 방송 중으로 판정
-    const isLive = html.includes('broad_no') && !html.includes('"broad_no":0');
+    const data = response.data;
+    // 2. SOOP API의 정석적인 라이브 판정 필드 사용
+    // station.is_broad가 true이거나 broad.broad_status가 "1"이면 방송 중
+    const isLive = !!(data.station && data.station.is_broad) || (data.broad && data.broad.broad_status === "1");
     
     return { userId, isLive };
   } catch (e) {
@@ -44,7 +46,7 @@ app.get("/live-status", async (req, res) => {
   }
 
   try {
-    // 20명 한꺼번에 비동기로 찔러보기
+    // 20명을 동시에 체크 (API 방식이라 매우 빠름)
     const results = await Promise.all(TARGETS.map(id => checkUser(id)));
     const newStatuses = {};
     results.forEach(r => { newStatuses[r.userId] = r.isLive; });
@@ -52,7 +54,7 @@ app.get("/live-status", async (req, res) => {
     cache = {
       statuses: newStatuses,
       checkedAt: new Date().toISOString(),
-      expiresAt: Date.now() + 45000 // 45초 캐시
+      expiresAt: Date.now() + 30000 // 30초 캐시
     };
 
     res.json({ statuses: cache.statuses, checkedAt: cache.checkedAt, cached: false });
@@ -61,5 +63,5 @@ app.get("/live-status", async (req, res) => {
   }
 });
 
-app.get("/", (req, res) => res.send("SOOP Light-Checker is running!"));
+app.get("/", (req, res) => res.send("SOOP API-Checker is running!"));
 app.listen(PORT, "0.0.0.0", () => console.log(`Server listening on port ${PORT}`));
