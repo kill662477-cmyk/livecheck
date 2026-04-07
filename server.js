@@ -55,38 +55,61 @@ app.get("/live-status", async (req, res) => {
   res.json({ statuses: liveCache.statuses, checkedAt: liveCache.checkedAt, cached: false });
 });
 
-// --- [신규 기능] 전체 중 최신 공지 10개 추출 ---
 app.get("/notices", async (req, res) => {
-  if (Date.now() < noticeCache.expiresAt && noticeCache.data.length > 0) {
+  // 캐시가 있고 데이터가 있으면 바로 반환
+  if (Date.now() < noticeCache.expiresAt && noticeCache.data && noticeCache.data.length > 0) {
     return res.json(noticeCache.data);
   }
 
   const rawNotices = [];
-  for (let i = 0; i < TARGETS.length; i += 5) {
-    const chunk = TARGETS.slice(i, i + 5);
+  // 한 번에 20명을 다 찌르면 차단당할 수 있으니 4명씩 천천히 수집
+  for (let i = 0; i < TARGETS.length; i += 4) {
+    const chunk = TARGETS.slice(i, i + 4);
     const results = await Promise.all(chunk.map(async (id) => {
       try {
         const response = await axios.get(`https://chapi.sooplive.com/api/${id}/board/0/list?page_no=1`, {
-          headers: { "User-Agent": "Mozilla/5.0..." },
-          timeout: 2500
+          headers: { 
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            "Referer": `https://ch.sooplive.com/${id}/board/0`
+          },
+          timeout: 5000 // 타임아웃을 5초로 늘림
         });
-        return (response.data?.data || []).slice(0, 2).map(p => ({
+        
+        const list = response.data?.data || [];
+        // 각 인원당 최신글 1개씩만 확실히 가져오기
+        return list.slice(0, 1).map(p => ({
           nickname: id,
           title: p.title,
           regDate: p.reg_date,
           visitCount: p.visit_cnt
         }));
-      } catch { return []; }
+      } catch (e) {
+        console.log(`${id} 공지 로드 실패`);
+        return [];
+      }
     }));
     rawNotices.push(...results.flat());
-    await new Promise(r => setTimeout(r, 100));
+    // 중간에 짧은 휴식 (차단 방지)
+    await new Promise(r => setTimeout(r, 300));
   }
 
+  // 전체 수집된 공지 중 최신순으로 10개 정렬
   const finalTen = rawNotices
+    .filter(n => n && n.regDate) // 데이터가 있는 것만 필터링
     .sort((a, b) => new Date(b.regDate) - new Date(a.regDate))
     .slice(0, 10);
 
-  noticeCache = { data: finalTen, checkedAt: new Date().toISOString(), expiresAt: Date.now() + (5 * 60 * 1000) };
+  // 데이터가 하나도 없으면 에러 메시지 대신 빈 배열을 보내지 않도록 처리
+  if (finalTen.length === 0) {
+    return res.status(404).json({ error: "공지를 찾을 수 없습니다. 나중에 다시 시도해주세요." });
+  }
+
+  noticeCache = {
+    data: finalTen,
+    checkedAt: new Date().toISOString(),
+    expiresAt: Date.now() + (3 * 60 * 1000) // 3분 캐시
+  };
+
   res.json(finalTen);
 });
 
