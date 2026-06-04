@@ -7,7 +7,7 @@ const SOOP_CLIENT_ID = process.env.SOOP_CLIENT_ID || "";
 
 // 확인할 20명
 const TARGETS = [
-  "brainzerg7", "rudals5467", "h78ert", "jihoon002",
+  "brainzerg7", "jk890202", "rudals5467", "h78ert", "jihoon002",
   "hoonykkk", "rondobba", "goodzerg", "kthrs9207", "freshtomato",
   "wjswlgns09", "thelddl", "alaelddl97", "db001202", "fpahsdltu1",
   "soju2022", "dlaguswl501", "seemin88", "2meonjin", "vldpfm2", "wlswn6565", "sksmsskdsl10"
@@ -16,6 +16,7 @@ const TARGETS = [
 // 표시용 이름
 const DISPLAY_NAMES = {
   brainzerg7: "김윤환",
+  jk890202: "김윤중",
   rudals5467: "이경민",
   h78ert: "박준오",
   jihoon002: "박수범",
