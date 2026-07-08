@@ -10,7 +10,7 @@ const TARGETS = [
   "brainzerg7", "jk890202", "rudals5467", "h78ert", "jihoon002",
   "hoonykkk", "rondobba", "goodzerg", "bye1013", "minchul", "freshtomato",
   "wjswlgns09", "thelddl", "alaelddl97", "db001202", "fpahsdltu1",
-  "soju2022", "dlaguswl501", "seemin88", "2meonjin", "vldpfm2", "sksmsskdsl10"
+  "soju2022", "dlaguswl501", "seemin88", "2meonjin", "vldpfm2", "sksmsskdsl10", "rnaqpdrjf"
 ];
 
 // 표시용 이름
@@ -36,7 +36,8 @@ const DISPLAY_NAMES = {
   seemin88: "비타밍",
   "2meonjin": "먼진",
   vldpfm2: "아리송이",
-sksmsskdsl10: "낭니"
+sksmsskdsl10: "낭니",
+rnaqpdrjf: "남덕선"
 };
 
 // 캐시
